@@ -17,6 +17,19 @@ defmodule Server do
     IO.puts("Logs from your program will appear here!")
 
     {:ok, socket} = :gen_tcp.listen(6379, [:binary, active: false, reuseaddr: true])
-    {:ok, _client} = :gen_tcp.accept(socket)
+    {:ok, client} = :gen_tcp.accept(socket)
+    loop(client)
+  end
+
+  def loop(client) do
+    recv_data = :gen_tcp.recv(client, 0)    # Read the incoming data
+    IO.puts("recv data: #{inspect(recv_data)}")
+    case recv_data do
+      {:ok, _data} ->
+        :gen_tcp.send(client, "+PONG\r\n")         # Send the PONG response
+        loop(client)                               # Continue the loop
+      {:error, :closed} ->
+        :gen_tcp.close(client)
+    end
   end
 end
