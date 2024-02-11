@@ -1,6 +1,6 @@
 defmodule Server do
   @moduledoc """
-  Your implementation of a Redis server
+  Custom implementation of a Redis server
   """
 
   use Application
