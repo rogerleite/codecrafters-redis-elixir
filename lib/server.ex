@@ -115,6 +115,10 @@ defmodule Server do
     def set(key, value) do
       Agent.update(__MODULE__, &Map.put(&1, key, value))
     end
+
+    def delete(key) do
+      Agent.update(__MODULE__, &Map.delete(&1, key))
+    end
   end
 
   defmodule Commands do
@@ -139,9 +143,7 @@ defmodule Server do
       meta = if is_nil(px) do
         []
       else
-        {ms, _} = Integer.parse(px)
-        seconds = ms / 1000
-        ttl = System.monotonic_time(:second) + seconds
+        ttl = :os.system_time(:millisecond) + String.to_integer(px)
         [ttl: ttl]
       end
 
@@ -156,17 +158,18 @@ defmodule Server do
 
     defp get([key | _options]) do
       result = MemoryStore.get(key)
-      system_time = System.monotonic_time(:second)
+      system_time = :os.system_time(:millisecond)
       IO.inspect(result, label: :get)
       IO.inspect(system_time, label: :get_system_time)
 
       case result do
         {value, meta} ->
-          ttl = Keyword.get(meta, :ttl, 0)
+          ttl = Keyword.get(meta, :ttl)
           if ttl > system_time do
             value |> bulk_string()
           else
-            bulk_string(nil) # expired
+            MemoryStore.delete(key)
+            bulk_string(nil)
           end
         nil ->
           bulk_string(nil)
