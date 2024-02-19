@@ -2,6 +2,7 @@ defmodule Server do
   @moduledoc """
   Custom implementation of a Redis server
   """
+  alias Server.Commands
   alias Server.MemoryStore
 
   use Application
@@ -46,66 +47,12 @@ defmodule Server do
         [cmd | args] = parse_data(data)
         IO.inspect([cmd | args], label: :parsed_data)
 
-        case String.downcase(cmd) do
-          "ping" ->
-            reply = if Enum.empty?(args), do: simple_string("PONG"), else: bulk_string(args)
-            :gen_tcp.send(socket, reply |> IO.inspect(label: :reply))
-
-          "echo" ->
-            reply = bulk_string(args)
-            :gen_tcp.send(socket, reply |> IO.inspect(label: :reply))
-
-          "set" ->
-            [key, value] = args
-            previous_value = MemoryStore.get(key)
-            MemoryStore.set(key, value)
-
-            reply =
-              if is_nil(previous_value),
-                do: simple_string("OK"),
-                else: bulk_string(previous_value)
-
-            :gen_tcp.send(socket, reply |> IO.inspect(label: :reply))
-
-          "get" ->
-            key = args |> List.first()
-            reply = MemoryStore.get(key) |> bulk_string()
-            :gen_tcp.send(socket, reply |> IO.inspect(label: :reply))
-        end
-
+        reply = Commands.execute(cmd, args)
+        :gen_tcp.send(socket, reply |> IO.inspect(label: :reply))
         handle_receive(socket)
 
       {:error, :closed} ->
         :gen_tcp.close(socket)
-    end
-  end
-
-  defp simple_string(value), do: "+#{value}\r\n"
-
-  defp bulk_string(value) when is_nil(value), do: "$-1\r\n"
-
-  defp bulk_string(value) when is_binary(value) do
-    "$#{String.length(value)}\r\n#{value}\r\n"
-  end
-
-  # [] => $0\r\n\r\n
-  # ["hello"] => $5\r\nhello\r\n
-  # ["hello world"] => *2\r\n$5\r\nhello\r\n$5\r\nworld\r\n
-  defp bulk_string(values) when is_list(values) do
-    case Enum.count(values) do
-      0 ->
-        "$0\r\n\r\n"
-
-      1 ->
-        value = values |> List.first()
-        "$#{String.length(value)}\r\n#{value}\r\n"
-
-      count ->
-        initial = "*#{count}\r\n"
-
-        Enum.reduce(values, initial, fn value, acc ->
-          "#{acc}$#{String.length(value)}\r\n#{value}\r\n"
-        end)
     end
   end
 
@@ -167,6 +114,97 @@ defmodule Server do
 
     def set(key, value) do
       Agent.update(__MODULE__, &Map.put(&1, key, value))
+    end
+  end
+
+  defmodule Commands do
+    def execute(cmd, args) do
+      case String.downcase(cmd) do
+        "ping" ->
+          if Enum.empty?(args), do: simple_string("PONG"), else: bulk_string(args)
+
+        "echo" ->
+          bulk_string(args)
+
+        "set" ->
+          set(args)
+
+        "get" ->
+          get(args)
+      end
+    end
+
+    defp set([key, value | options]) do
+      px = option_get(options, "px")
+      meta = if is_nil(px) do
+        []
+      else
+        {ms, _} = Integer.parse(px)
+        seconds = ms / 1000
+        ttl = System.monotonic_time(:second) + seconds
+        [ttl: ttl]
+      end
+
+      previous_value = get([key])
+      IO.inspect({value, meta}, label: :set)
+      MemoryStore.set(key, {value, meta})
+
+      if (previous_value == bulk_string(nil)),
+        do: simple_string("OK"),
+        else: previous_value
+    end
+
+    defp get([key | _options]) do
+      result = MemoryStore.get(key)
+      system_time = System.monotonic_time(:second)
+      IO.inspect(result, label: :get)
+      IO.inspect(system_time, label: :get_system_time)
+
+      case result do
+        {value, meta} ->
+          ttl = Keyword.get(meta, :ttl, 0)
+          if ttl > system_time do
+            value |> bulk_string()
+          else
+            bulk_string(nil) # expired
+          end
+        nil ->
+          bulk_string(nil)
+      end
+    end
+
+    defp option_get(options, key) do
+      idx = Enum.find_index(options, &(String.downcase(&1) == key))
+      if is_nil(idx), do: nil, else: Enum.at(options, idx + 1)
+    end
+
+    defp simple_string(value), do: "+#{value}\r\n"
+
+    defp bulk_string(value) when is_nil(value), do: "$-1\r\n"
+
+    defp bulk_string(value) when is_binary(value) do
+      "$#{String.length(value)}\r\n#{value}\r\n"
+    end
+
+    # [] => $0\r\n\r\n
+    # ["hello"] => $5\r\nhello\r\n
+    # ["hello world"] => *2\r\n$5\r\nhello\r\n$5\r\nworld\r\n
+    defp bulk_string(values) when is_list(values) do
+      case Enum.count(values) do
+        0 ->
+          "$0\r\n\r\n"
+
+        1 ->
+          value = values |> List.first()
+          "$#{String.length(value)}\r\n#{value}\r\n"
+
+        count ->
+          initial = "*#{count}\r\n"
+
+          Enum.reduce(values, initial, fn value, acc ->
+            "#{acc}$#{String.length(value)}\r\n#{value}\r\n"
+          end)
+      end
     end
   end
 end
